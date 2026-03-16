@@ -118,7 +118,7 @@ class OtherPage(BasePage):
         # 社群按鈕
         self.discordBtn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://discord.gg/h4dEh3b8Bt")))
         self.githubBtn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/iisHong0w0/Axiom-AI-Aimbot")))
-        self.donateBtn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://www.paypal.com/paypalme/iis20160512")))
+        self.donateBtn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(os.path.join(self.base_path, "..", "..", "MVP.html")))))
     
     def _loadFromConfig(self):
         """從 Config 載入值"""
