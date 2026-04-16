@@ -17,6 +17,109 @@ if TYPE_CHECKING:
 _WARNED_MESSAGES: set[str] = set()
 
 
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _apply_single_video_filter(frame_bgr: np.ndarray, name: str, options: dict[str, Any]) -> np.ndarray:
+    normalized_name = name.strip().lower()
+    if normalized_name == 'sharpen':
+        strength = min(3.0, max(0.0, _safe_float(options.get('strength', 1.0), 1.0)))
+        blur = cv2.GaussianBlur(frame_bgr, (0, 0), 1.0)
+        return cv2.addWeighted(frame_bgr, 1.0 + strength, blur, -strength, 0)
+
+    if normalized_name == 'denoise':
+        h = min(30, max(1, _safe_int(options.get('strength', 8), 8)))
+        return cv2.fastNlMeansDenoisingColored(frame_bgr, None, h, h, 7, 21)
+
+    if normalized_name == 'deblock':
+        sigma = min(120, max(10, _safe_int(options.get('strength', 35), 35)))
+        return cv2.bilateralFilter(frame_bgr, 7, sigma, sigma)
+
+    if normalized_name == 'color correction':
+        gamma = min(2.5, max(0.4, _safe_float(options.get('gamma', 1.0), 1.0)))
+        sat = min(2.0, max(0.5, _safe_float(options.get('saturation', 1.0), 1.0)))
+        gamma_frame = np.power(frame_bgr.astype(np.float32) / 255.0, 1.0 / gamma) * 255.0
+        corrected = np.clip(gamma_frame, 0, 255).astype(np.uint8)
+        hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[..., 1] = np.clip(hsv[..., 1] * sat, 0, 255)
+        return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+    if normalized_name == 'brightness/contrast':
+        brightness = min(100, max(-100, _safe_int(options.get('brightness', 0), 0)))
+        contrast = min(3.0, max(0.3, _safe_float(options.get('contrast', 1.0), 1.0)))
+        return cv2.convertScaleAbs(frame_bgr, alpha=contrast, beta=brightness)
+
+    if normalized_name == 'vibrance':
+        amount = min(2.0, max(0.0, _safe_float(options.get('amount', 0.35), 0.35)))
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+        sat = hsv[..., 1]
+        gain = 1.0 + amount * (1.0 - (sat / 255.0))
+        hsv[..., 1] = np.clip(sat * gain, 0, 255)
+        return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+    if normalized_name in {'lanczos', 'bicubic'}:
+        factor = min(2.0, max(1.05, _safe_float(options.get('factor', 1.25), 1.25)))
+        interpolation = cv2.INTER_LANCZOS4 if normalized_name == 'lanczos' else cv2.INTER_CUBIC
+        h, w = frame_bgr.shape[:2]
+        up = cv2.resize(frame_bgr, (max(1, int(w * factor)), max(1, int(h * factor))), interpolation=interpolation)
+        return cv2.resize(up, (w, h), interpolation=interpolation)
+
+    if normalized_name == 'super resolution':
+        sigma_s = min(80, max(5, _safe_int(options.get('sigma_s', 20), 20)))
+        sigma_r = min(0.8, max(0.02, _safe_float(options.get('sigma_r', 0.25), 0.25)))
+        detail = cv2.detailEnhance(frame_bgr, sigma_s=sigma_s, sigma_r=sigma_r)
+        return cv2.GaussianBlur(detail, (0, 0), 0.4)
+
+    return frame_bgr
+
+
+def apply_configured_video_filters(frame: np.ndarray, config: Config, method: str) -> np.ndarray:
+    if method not in {'uvc', 'ndi'}:
+        return frame
+
+    filter_stack = getattr(config, 'video_filters', []) or []
+    if not isinstance(filter_stack, list) or not filter_stack:
+        return frame
+
+    if frame.ndim != 3 or frame.shape[2] < 3:
+        return frame
+
+    has_alpha = frame.shape[2] == 4
+    alpha = frame[:, :, 3:4].copy() if has_alpha else None
+    working = frame[:, :, :3].copy()
+    try:
+        for item in filter_stack:
+            if not isinstance(item, dict):
+                continue
+            if not bool(item.get('enabled', True)):
+                continue
+            name = str(item.get('name', '')).strip()
+            if not name:
+                continue
+            options = item.get('options', {})
+            if not isinstance(options, dict):
+                options = {}
+            working = _apply_single_video_filter(working, name, options)
+    except Exception as exc:
+        _warn_once('video_filter_error', f'[截圖] 影像濾鏡套用失敗: {exc}')
+        return frame
+
+    if has_alpha and alpha is not None:
+        return np.concatenate((working, alpha), axis=2)
+    return working
+
+
 def _uvc_signature(config: Config) -> tuple[int, int, int, int, bool, str, str, str]:
     return (
         int(getattr(config, 'uvc_device_index', 0)),
@@ -121,6 +224,7 @@ class UVCCapture:
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.backend_name = 'uvc'
         device_index = int(getattr(config, 'uvc_device_index', 0))
         width = int(getattr(config, 'uvc_width', 1920))
         height = int(getattr(config, 'uvc_height', 1080))
@@ -184,7 +288,10 @@ class UVCCapture:
         if not ok or frame_bgr is None:
             return None
 
-        full_frame_bgr = frame_bgr
+        frame_bgra = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2BGRA)
+        frame_bgra = apply_configured_video_filters(frame_bgra, self.config, 'uvc')
+        full_frame_bgr = frame_bgra[:, :, :3]
+        frame_bgr = full_frame_bgr
 
         if self.show_window:
             try:
@@ -508,4 +615,9 @@ def capture_frame(screen_capture: Any, region: dict[str, int]) -> np.ndarray | N
         _warn_once('capture_empty_frame', '[截圖] 抓到空影像，已略過該幀')
         return None
 
+    if getattr(screen_capture, 'backend_name', '') != 'uvc':
+        config_obj = getattr(screen_capture, 'config', None)
+        method = str(getattr(config_obj, 'screenshot_method', 'mss')).lower() if config_obj else 'mss'
+        if method in {'uvc', 'ndi'} and config_obj is not None:
+            frame = apply_configured_video_filters(frame, config_obj, method)
     return frame
