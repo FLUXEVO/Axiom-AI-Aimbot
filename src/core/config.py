@@ -54,6 +54,7 @@ class Config:
         self.uvc_window_name: str = "Axiom UVC Preview"
         self.uvc_preview_scale_mode: str = "scale_to_fit"
         self.ndi_source_name: str = ""
+        self.video_filters: List[Dict[str, Any]] = []
         self.crosshairX: int = self.width // 2
         self.crosshairY: int = self.height // 2
         self.region: Dict[str, int] = {
@@ -249,6 +250,7 @@ class Config:
             'uvc_window_name': self.uvc_window_name,
             'uvc_preview_scale_mode': self.uvc_preview_scale_mode,
             'ndi_source_name': self.ndi_source_name,
+            'video_filters': self.video_filters,
             'keep_detecting': self.keep_detecting,
             'always_aim': self.always_aim,
             'fov_follow_mouse': self.fov_follow_mouse,
