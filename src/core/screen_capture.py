@@ -251,7 +251,6 @@ def initialize_screen_capture(config: Config) -> Any:
     elif screenshot_method != 'mss':
         _warn_once('invalid_screenshot_method', f"[截圖] 未知截圖方式 '{screenshot_method}'，已改為 mss")
 
-    config.screenshot_method = 'mss'
     try:
         mss_capture = mss.mss()
     except Exception as exc:
@@ -290,7 +289,7 @@ def reinitialize_if_method_changed(
     _cleanup_capture(current_capture)
 
     new_capture = initialize_screen_capture(config)
-    # initialize_screen_capture may normalise the method (e.g. fallback to mss)
+    # Keep user's configured method in config; active backend is tracked separately.
     new_method = getattr(config, 'screenshot_method', 'mss')
     return new_capture, new_method
 
