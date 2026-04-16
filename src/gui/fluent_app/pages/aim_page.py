@@ -6,7 +6,11 @@ import math
 import glob
 import threading
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox, QStackedWidget
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox, QStackedWidget,
+    QDialog, QListWidget, QListWidgetItem, QFormLayout, QLabel, QCheckBox,
+    QDoubleSpinBox, QSpinBox,
+)
 from PyQt6.QtGui import QDesktopServices
 from qfluentwidgets import (
     SettingCardGroup, ComboBoxSettingCard, SwitchSettingCard,
@@ -22,6 +26,204 @@ from ..components.slider_spin_card import SliderSpinCard, SliderLabelCard
 
 from ..base_page import BasePage
 from ..language_manager import t
+
+
+class VideoFiltersDialog(QDialog):
+    """Dialog for building and configuring stacked video filters."""
+
+    FILTER_OPTIONS: dict[str, list[dict[str, object]]] = {
+        "Sharpen": [
+            {"key": "strength", "label": "Strength", "type": "double", "min": 0.0, "max": 3.0, "step": 0.05, "default": 1.0},
+        ],
+        "Denoise": [
+            {"key": "strength", "label": "Strength", "type": "int", "min": 1, "max": 30, "step": 1, "default": 8},
+        ],
+        "Deblock": [
+            {"key": "strength", "label": "Strength", "type": "int", "min": 10, "max": 120, "step": 1, "default": 35},
+        ],
+        "Color Correction": [
+            {"key": "gamma", "label": "Gamma", "type": "double", "min": 0.4, "max": 2.5, "step": 0.05, "default": 1.0},
+            {"key": "saturation", "label": "Saturation", "type": "double", "min": 0.5, "max": 2.0, "step": 0.05, "default": 1.0},
+        ],
+        "Brightness/Contrast": [
+            {"key": "brightness", "label": "Brightness", "type": "int", "min": -100, "max": 100, "step": 1, "default": 0},
+            {"key": "contrast", "label": "Contrast", "type": "double", "min": 0.3, "max": 3.0, "step": 0.05, "default": 1.0},
+        ],
+        "Vibrance": [
+            {"key": "amount", "label": "Amount", "type": "double", "min": 0.0, "max": 2.0, "step": 0.05, "default": 0.35},
+        ],
+        "Lanczos": [
+            {"key": "factor", "label": "Factor", "type": "double", "min": 1.05, "max": 2.0, "step": 0.05, "default": 1.25},
+        ],
+        "Bicubic": [
+            {"key": "factor", "label": "Factor", "type": "double", "min": 1.05, "max": 2.0, "step": 0.05, "default": 1.25},
+        ],
+        "Super Resolution": [
+            {"key": "sigma_s", "label": "Sigma S", "type": "int", "min": 5, "max": 80, "step": 1, "default": 20},
+            {"key": "sigma_r", "label": "Sigma R", "type": "double", "min": 0.02, "max": 0.8, "step": 0.01, "default": 0.25},
+        ],
+    }
+
+    def __init__(self, filters: list[dict[str, object]], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Video Filters")
+        self.setMinimumSize(700, 440)
+        self._filters: list[dict[str, object]] = [dict(item) for item in (filters or []) if isinstance(item, dict)]
+        self._option_widgets: dict[str, QWidget] = {}
+
+        root = QVBoxLayout(self)
+        top_layout = QHBoxLayout()
+        root.addLayout(top_layout)
+
+        self.filterList = QListWidget(self)
+        self.filterList.setMinimumWidth(280)
+        top_layout.addWidget(self.filterList, 1)
+
+        right_container = QWidget(self)
+        right_layout = QVBoxLayout(right_container)
+        top_layout.addWidget(right_container, 2)
+        self.optionForm = QFormLayout()
+        right_layout.addLayout(self.optionForm)
+        right_layout.addStretch(1)
+
+        controls = QHBoxLayout()
+        root.addLayout(controls)
+        self.filterPicker = ComboBox(self)
+        self.filterPicker.addItems(list(self.FILTER_OPTIONS.keys()))
+        self.addBtn = PushButton("Add")
+        self.removeBtn = PushButton("Remove")
+        self.upBtn = PushButton("Move Up")
+        self.downBtn = PushButton("Move Down")
+        controls.addWidget(self.filterPicker)
+        controls.addWidget(self.addBtn)
+        controls.addWidget(self.removeBtn)
+        controls.addWidget(self.upBtn)
+        controls.addWidget(self.downBtn)
+        controls.addStretch(1)
+
+        self.saveBtn = PrimaryPushButton("Save")
+        self.cancelBtn = PushButton("Cancel")
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(self.cancelBtn)
+        footer.addWidget(self.saveBtn)
+        root.addLayout(footer)
+
+        self.addBtn.clicked.connect(self._addFilter)
+        self.removeBtn.clicked.connect(self._removeSelected)
+        self.upBtn.clicked.connect(lambda: self._moveSelected(-1))
+        self.downBtn.clicked.connect(lambda: self._moveSelected(1))
+        self.filterList.currentRowChanged.connect(self._refreshOptionEditor)
+        self.saveBtn.clicked.connect(self.accept)
+        self.cancelBtn.clicked.connect(self.reject)
+        self._refreshList()
+
+    def get_filters(self) -> list[dict[str, object]]:
+        return self._filters
+
+    def _refreshList(self) -> None:
+        self.filterList.clear()
+        for filter_item in self._filters:
+            name = str(filter_item.get("name", "Unknown"))
+            enabled = bool(filter_item.get("enabled", True))
+            label = f"{name}{'' if enabled else ' (disabled)'}"
+            self.filterList.addItem(QListWidgetItem(label))
+        if self._filters and self.filterList.currentRow() < 0:
+            self.filterList.setCurrentRow(0)
+        self._refreshOptionEditor(self.filterList.currentRow())
+
+    def _makeDefaultFilter(self, name: str) -> dict[str, object]:
+        options: dict[str, object] = {}
+        for spec in self.FILTER_OPTIONS.get(name, []):
+            options[str(spec["key"])] = spec["default"]
+        return {"name": name, "enabled": True, "options": options}
+
+    def _addFilter(self) -> None:
+        name = self.filterPicker.currentText().strip()
+        if not name:
+            return
+        self._filters.append(self._makeDefaultFilter(name))
+        self._refreshList()
+        self.filterList.setCurrentRow(len(self._filters) - 1)
+
+    def _removeSelected(self) -> None:
+        idx = self.filterList.currentRow()
+        if idx < 0 or idx >= len(self._filters):
+            return
+        self._filters.pop(idx)
+        self._refreshList()
+
+    def _moveSelected(self, direction: int) -> None:
+        idx = self.filterList.currentRow()
+        new_idx = idx + direction
+        if idx < 0 or new_idx < 0 or new_idx >= len(self._filters):
+            return
+        self._filters[idx], self._filters[new_idx] = self._filters[new_idx], self._filters[idx]
+        self._refreshList()
+        self.filterList.setCurrentRow(new_idx)
+
+    def _clearOptionWidgets(self) -> None:
+        while self.optionForm.rowCount() > 0:
+            self.optionForm.removeRow(0)
+        self._option_widgets.clear()
+
+    def _refreshOptionEditor(self, idx: int) -> None:
+        self._clearOptionWidgets()
+        if idx < 0 or idx >= len(self._filters):
+            self.optionForm.addRow(QLabel("Select a filter to configure"))
+            return
+        filter_item = self._filters[idx]
+        name = str(filter_item.get("name", ""))
+        options = filter_item.setdefault("options", {})
+        if not isinstance(options, dict):
+            options = {}
+            filter_item["options"] = options
+
+        enabled_check = QCheckBox("Enabled")
+        enabled_check.setChecked(bool(filter_item.get("enabled", True)))
+        enabled_check.toggled.connect(lambda checked: self._onEnabledChanged(idx, checked))
+        self.optionForm.addRow("Status", enabled_check)
+
+        specs = self.FILTER_OPTIONS.get(name, [])
+        if not specs:
+            self.optionForm.addRow(QLabel("No options for this filter"))
+            return
+
+        for spec in specs:
+            key = str(spec["key"])
+            label = str(spec["label"])
+            default_value = spec["default"]
+            current = options.get(key, default_value)
+            if spec["type"] == "int":
+                editor = QSpinBox()
+                editor.setRange(int(spec["min"]), int(spec["max"]))
+                editor.setSingleStep(int(spec["step"]))
+                editor.setValue(int(current))
+                editor.valueChanged.connect(lambda value, f_idx=idx, option_key=key: self._onOptionChanged(f_idx, option_key, int(value)))
+            else:
+                editor = QDoubleSpinBox()
+                editor.setDecimals(2)
+                editor.setRange(float(spec["min"]), float(spec["max"]))
+                editor.setSingleStep(float(spec["step"]))
+                editor.setValue(float(current))
+                editor.valueChanged.connect(lambda value, f_idx=idx, option_key=key: self._onOptionChanged(f_idx, option_key, float(value)))
+            self._option_widgets[key] = editor
+            self.optionForm.addRow(label, editor)
+
+    def _onEnabledChanged(self, idx: int, checked: bool) -> None:
+        if idx < 0 or idx >= len(self._filters):
+            return
+        self._filters[idx]["enabled"] = bool(checked)
+        current_row = self.filterList.currentRow()
+        self._refreshList()
+        self.filterList.setCurrentRow(current_row)
+
+    def _onOptionChanged(self, idx: int, key: str, value: object) -> None:
+        if idx < 0 or idx >= len(self._filters):
+            return
+        options = self._filters[idx].setdefault("options", {})
+        if isinstance(options, dict):
+            options[key] = value
 
 
 class AimPage(BasePage):
@@ -72,6 +274,19 @@ class AimPage(BasePage):
         )
         self.modelCard.hBoxLayout.addWidget(self.modelCombo, 0, Qt.AlignmentFlag.AlignRight)
         self.modelCard.hBoxLayout.addSpacing(16)
+
+        # Inference backend
+        self.inferenceBackendCombo = ComboBox()
+        self.inferenceBackendCombo.addItems(["Auto", "CUDA", "DirectML", "CPU"])
+        self.inferenceBackendCombo.setMinimumWidth(150)
+        self.inferenceBackendCard = SettingCard(
+            FluentIcon.COMMAND_PROMPT,
+            t("inference_backend"),
+            "",
+            self.modelGroup
+        )
+        self.inferenceBackendCard.hBoxLayout.addWidget(self.inferenceBackendCombo, 0, Qt.AlignmentFlag.AlignRight)
+        self.inferenceBackendCard.hBoxLayout.addSpacing(16)
 
         # Open Model Folder
         self.openModelFolderBtn = PrimaryPushButton(t("open_model_folder"))
@@ -174,7 +389,7 @@ class AimPage(BasePage):
 
         # Screenshot Method
         self.screenshotMethodCombo = ComboBox()
-        self.screenshotMethodCombo.addItems(["mss", "dxcam", "uvc"])
+        self.screenshotMethodCombo.addItems(["mss", "dxcam", "uvc", "ndi"])
         self.screenshotMethodCombo.setMinimumWidth(150)
         self.screenshotMethodCard = SettingCard(
             FluentIcon.CAMERA,
@@ -194,12 +409,125 @@ class AimPage(BasePage):
             parent=self.generalGroup
         )
 
+        self.uvcWidthCard = SliderSpinCard(
+            FluentIcon.FULL_SCREEN,
+            "UVC Width",
+            320, 7680,
+            suffix="px",
+            description="",
+            parent=self.generalGroup
+        )
+
+        self.uvcHeightCard = SliderSpinCard(
+            FluentIcon.FULL_SCREEN,
+            "UVC Height",
+            240, 4320,
+            suffix="px",
+            description="",
+            parent=self.generalGroup
+        )
+        self.uvcWidthCard.setVisible(False)
+        self.uvcHeightCard.setVisible(False)
+
+        self.uvcResolutionCombo = ComboBox()
+        self.uvcResolutionCombo.setMinimumWidth(180)
+        self.uvcResolutionCard = SettingCard(
+            FluentIcon.FULL_SCREEN,
+            "UVC Resolution",
+            "Auto-detect supported resolutions",
+            self.generalGroup
+        )
+        self.uvcResolutionCard.hBoxLayout.addWidget(self.uvcResolutionCombo, 0, Qt.AlignmentFlag.AlignRight)
+        self.uvcResolutionCard.hBoxLayout.addSpacing(16)
+
+        self.uvcRefreshResolutionBtn = PushButton(t("refresh"))
+        self.uvcRefreshResolutionBtn.setFixedWidth(80)
+        self.uvcRefreshResolutionCard = SettingCard(
+            FluentIcon.SYNC,
+            "Refresh UVC Resolution List",
+            "",
+            self.generalGroup
+        )
+        self.uvcRefreshResolutionCard.hBoxLayout.addWidget(self.uvcRefreshResolutionBtn, 0, Qt.AlignmentFlag.AlignRight)
+        self.uvcRefreshResolutionCard.hBoxLayout.addSpacing(16)
+
+        self.uvcFpsCard = SliderSpinCard(
+            FluentIcon.SPEED_MEDIUM,
+            "UVC FPS",
+            1, 240,
+            suffix="",
+            description="",
+            parent=self.generalGroup
+        )
+
+        self.uvcCaptureMethodCombo = ComboBox()
+        self.uvcCaptureMethodCombo.addItems(["dshow", "msmf", "auto", "any"])
+        self.uvcCaptureMethodCombo.setMinimumWidth(140)
+        self.uvcCaptureMethodCard = SettingCard(
+            FluentIcon.CAMERA,
+            "UVC Capture Method",
+            "Select OpenCV capture backend",
+            self.generalGroup
+        )
+        self.uvcCaptureMethodCard.hBoxLayout.addWidget(self.uvcCaptureMethodCombo, 0, Qt.AlignmentFlag.AlignRight)
+        self.uvcCaptureMethodCard.hBoxLayout.addSpacing(16)
+
         self.uvcPreviewCard = SwitchSettingCard(
             FluentIcon.VIEW,
             "UVC Preview Window",
             "",
             parent=self.generalGroup
         )
+
+        self.uvcPreviewScaleCombo = ComboBox()
+        self.uvcPreviewScaleCombo.addItems(["scale_to_fit", "scale_to_canvas", "fit_to_screen"])
+        self.uvcPreviewScaleCombo.setMinimumWidth(170)
+        self.uvcPreviewScaleCard = SettingCard(
+            FluentIcon.FULL_SCREEN,
+            "UVC Preview Scale Mode",
+            "",
+            self.generalGroup
+        )
+        self.uvcPreviewScaleCard.hBoxLayout.addWidget(self.uvcPreviewScaleCombo, 0, Qt.AlignmentFlag.AlignRight)
+        self.uvcPreviewScaleCard.hBoxLayout.addSpacing(16)
+        self.uvcPreviewScaleCard.setVisible(False)
+
+        self.ndiSourceCombo = ComboBox()
+        self.ndiSourceCombo.setEditable(True)
+        self.ndiSourceCombo.setMinimumWidth(220)
+        self.ndiSourceCard = SettingCard(
+            FluentIcon.VIDEO,
+            "NDI Source",
+            "Select or type an NDI source name",
+            self.generalGroup
+        )
+        self.ndiSourceCard.hBoxLayout.addWidget(self.ndiSourceCombo, 0, Qt.AlignmentFlag.AlignRight)
+        self.ndiSourceCard.hBoxLayout.addSpacing(16)
+        self.ndiSourceCard.setVisible(False)
+
+        self.ndiRefreshSourceBtn = PushButton(t("refresh"))
+        self.ndiRefreshSourceBtn.setFixedWidth(80)
+        self.ndiRefreshSourceCard = SettingCard(
+            FluentIcon.SYNC,
+            "Refresh NDI Source List",
+            "",
+            self.generalGroup
+        )
+        self.ndiRefreshSourceCard.hBoxLayout.addWidget(self.ndiRefreshSourceBtn, 0, Qt.AlignmentFlag.AlignRight)
+        self.ndiRefreshSourceCard.hBoxLayout.addSpacing(16)
+        self.ndiRefreshSourceCard.setVisible(False)
+
+        self.videoFiltersBtn = PushButton("Filters")
+        self.videoFiltersBtn.setFixedWidth(100)
+        self.videoFiltersCard = SettingCard(
+            FluentIcon.CAMERA,
+            "Video Filters",
+            "Stack filters for UVC/NDI input quality enhancement",
+            self.generalGroup
+        )
+        self.videoFiltersCard.hBoxLayout.addWidget(self.videoFiltersBtn, 0, Qt.AlignmentFlag.AlignRight)
+        self.videoFiltersCard.hBoxLayout.addSpacing(16)
+        self.videoFiltersCard.setVisible(False)
 
         # Always Aim (no need to press aim key)
         self.alwaysAimCard = SwitchSettingCard(
@@ -593,6 +921,7 @@ class AimPage(BasePage):
         """排版所有控制項"""
         # 模型設定
         self.modelGroup.addSettingCard(self.modelCard)
+        self.modelGroup.addSettingCard(self.inferenceBackendCard)
         self.modelGroup.addSettingCard(self.openModelFolderCard)
         self.addContent(self.modelGroup)
 
@@ -610,7 +939,17 @@ class AimPage(BasePage):
         self.generalGroup.addSettingCard(self.aimPartCard)
         self.generalGroup.addSettingCard(self.mouseMoveCard)
         self.generalGroup.addSettingCard(self.uvcDeviceCard)
+        self.generalGroup.addSettingCard(self.uvcResolutionCard)
+        self.generalGroup.addSettingCard(self.uvcRefreshResolutionCard)
+        self.generalGroup.addSettingCard(self.uvcWidthCard)
+        self.generalGroup.addSettingCard(self.uvcHeightCard)
+        self.generalGroup.addSettingCard(self.uvcFpsCard)
+        self.generalGroup.addSettingCard(self.uvcCaptureMethodCard)
         self.generalGroup.addSettingCard(self.uvcPreviewCard)
+        self.generalGroup.addSettingCard(self.uvcPreviewScaleCard)
+        self.generalGroup.addSettingCard(self.ndiSourceCard)
+        self.generalGroup.addSettingCard(self.ndiRefreshSourceCard)
+        self.generalGroup.addSettingCard(self.videoFiltersCard)
         self.generalGroup.addSettingCard(self.alwaysAimCard)
         self.generalGroup.addSettingCard(self.keepDetectingCard)
         self.generalGroup.addSettingCard(self.idleDetectEnableCard)
@@ -708,6 +1047,7 @@ class AimPage(BasePage):
         """連接信號"""
         # 模型
         self.modelCombo.currentTextChanged.connect(self._onModelChanged)
+        self.inferenceBackendCombo.currentTextChanged.connect(self._onInferenceBackendChanged)
         self.openModelFolderBtn.clicked.connect(self._openModelFolder)
 
         # FOV 與偵測範圍 - 使用新組件的 valueChanged 信號
@@ -723,7 +1063,15 @@ class AimPage(BasePage):
         self.mouseMoveCombo.currentTextChanged.connect(self._onMouseMoveChanged)
         self.screenshotMethodCombo.currentTextChanged.connect(self._onScreenshotMethodChanged)
         self.uvcDeviceCard.valueChanged.connect(self._onUvcDeviceChanged)
+        self.uvcResolutionCombo.currentTextChanged.connect(self._onUvcResolutionChanged)
+        self.uvcRefreshResolutionBtn.clicked.connect(self._refreshUvcResolutions)
+        self.uvcFpsCard.valueChanged.connect(self._onUvcFpsChanged)
+        self.uvcCaptureMethodCombo.currentTextChanged.connect(self._onUvcCaptureMethodChanged)
         self.uvcPreviewCard.checkedChanged.connect(self._onUvcPreviewChanged)
+        self.uvcPreviewScaleCombo.currentTextChanged.connect(self._onUvcPreviewScaleModeChanged)
+        self.ndiSourceCombo.currentTextChanged.connect(self._onNdiSourceChanged)
+        self.ndiRefreshSourceBtn.clicked.connect(self._refreshNdiSources)
+        self.videoFiltersBtn.clicked.connect(self._openVideoFiltersDialog)
         self.alwaysAimCard.checkedChanged.connect(self._onAlwaysAimChanged)
         self.keepDetectingCard.checkedChanged.connect(self._onKeepDetectingChanged)
         self.idleDetectEnableCard.checkedChanged.connect(self._onIdleDetectEnableChanged)
@@ -792,6 +1140,18 @@ class AimPage(BasePage):
             self.modelCombo.setCurrentIndex(idx)
         self.modelCombo.blockSignals(False)
 
+        backend_map = {
+            "auto": "Auto",
+            "cuda": "CUDA",
+            "directml": "DirectML",
+            "cpu": "CPU",
+        }
+        self.inferenceBackendCombo.blockSignals(True)
+        backend_text = backend_map.get(getattr(self._config, "inference_backend", "auto").lower(), "Auto")
+        self.inferenceBackendCombo.setCurrentText(backend_text)
+        self.inferenceBackendCombo.blockSignals(False)
+        self._updateInferenceBackendSubtitle()
+
         # FOV 與偵測範圍 - 使用新組件的 setValue
         self.fovCard.setValue(self._config.fov_size)
         self.fovFollowCard.setChecked(self._config.fov_follow_mouse)
@@ -813,12 +1173,35 @@ class AimPage(BasePage):
         if self._config.mouse_move_method in mouse_methods:
             self.mouseMoveCombo.setCurrentIndex(mouse_methods.index(self._config.mouse_move_method))
 
-        screenshot_methods = ["mss", "dxcam", "uvc"]
+        screenshot_methods = ["mss", "dxcam", "uvc", "ndi"]
         screenshot_method = getattr(self._config, 'screenshot_method', 'mss')
         if screenshot_method in screenshot_methods:
             self.screenshotMethodCombo.setCurrentIndex(screenshot_methods.index(screenshot_method))
         self.uvcDeviceCard.setValue(int(getattr(self._config, 'uvc_device_index', 0)))
+        self.uvcCaptureMethodCombo.setCurrentText(str(getattr(self._config, 'uvc_capture_method', 'dshow')))
+        self._refreshUvcResolutions()
+        resolution_text = str(getattr(self._config, 'uvc_resolution', f"{getattr(self._config, 'uvc_width', self._config.width)}x{getattr(self._config, 'uvc_height', self._config.height)}"))
+        idx = self.uvcResolutionCombo.findText(resolution_text)
+        if idx < 0:
+            self.uvcResolutionCombo.addItem(resolution_text)
+            idx = self.uvcResolutionCombo.findText(resolution_text)
+        if idx >= 0:
+            self.uvcResolutionCombo.setCurrentIndex(idx)
+        self.uvcFpsCard.setValue(int(getattr(self._config, 'uvc_fps', 60)))
         self.uvcPreviewCard.setChecked(bool(getattr(self._config, 'uvc_show_window', True)))
+        self.uvcPreviewScaleCombo.setCurrentText(str(getattr(self._config, 'uvc_preview_scale_mode', 'scale_to_fit')))
+        self._refreshNdiSources()
+        ndi_source_name = str(getattr(self._config, 'ndi_source_name', '')).strip()
+        if ndi_source_name:
+            idx = self.ndiSourceCombo.findText(ndi_source_name)
+            if idx < 0:
+                self.ndiSourceCombo.addItem(ndi_source_name)
+                idx = self.ndiSourceCombo.findText(ndi_source_name)
+            if idx >= 0:
+                self.ndiSourceCombo.setCurrentIndex(idx)
+            else:
+                self.ndiSourceCombo.setCurrentText(ndi_source_name)
+        self._updateVideoFiltersSummary()
         self._updateUvcControlsVisibility(screenshot_method)
         self.alwaysAimCard.setChecked(getattr(self._config, 'always_aim', False))
         self.keepDetectingCard.setChecked(getattr(self._config, 'keep_detecting', False))
@@ -918,6 +1301,29 @@ class AimPage(BasePage):
         if self._config and text:
             self._config.model_path = os.path.join("Model", text)
 
+    def _onInferenceBackendChanged(self, text):
+        if not self._config:
+            return
+
+        backend_map = {
+            "Auto": "auto",
+            "CUDA": "cuda",
+            "DirectML": "directml",
+            "CPU": "cpu",
+        }
+        selected_backend = backend_map.get(text, "auto")
+        if getattr(self._config, "inference_backend", "auto") != selected_backend:
+            self._config.inference_backend = selected_backend
+        self._updateInferenceBackendSubtitle()
+
+    def _updateInferenceBackendSubtitle(self):
+        if not hasattr(self, "inferenceBackendCard"):
+            return
+        provider = getattr(self._config, "current_provider", "Unknown") if self._config else "Unknown"
+        self.inferenceBackendCard.contentLabel.setText(
+            f"{t('inference_backend_desc')} ({t('inference_backend_current')}: {provider})"
+        )
+
     def _onFovChanged(self, value):
         """FOV 改變"""
         if self._config:
@@ -968,19 +1374,141 @@ class AimPage(BasePage):
         if self._config:
             self._config.screenshot_method = text
         self._updateUvcControlsVisibility(text)
+        main_window = self.window()
+        if main_window and hasattr(main_window, 'updateVisualsVisibilityForScreenshotMethod'):
+            main_window.updateVisualsVisibilityForScreenshotMethod(text)
 
     def _onUvcDeviceChanged(self, value):
         if self._config:
             self._config.uvc_device_index = int(value)
+        self._refreshUvcResolutions()
+
+    def _onUvcResolutionChanged(self, value):
+        if self._config:
+            text = str(value).strip().lower()
+            if 'x' not in text:
+                return
+            width_str, height_str = text.split('x', 1)
+            try:
+                self._config.uvc_width = int(width_str)
+                self._config.uvc_height = int(height_str)
+                self._config.uvc_resolution = f"{self._config.uvc_width}x{self._config.uvc_height}"
+            except ValueError:
+                return
+
+    def _onUvcFpsChanged(self, value):
+        if self._config:
+            self._config.uvc_fps = int(value)
+
+    def _onUvcCaptureMethodChanged(self, text):
+        if self._config:
+            self._config.uvc_capture_method = str(text)
+        self._refreshUvcResolutions()
 
     def _onUvcPreviewChanged(self, checked):
         if self._config:
             self._config.uvc_show_window = bool(checked)
 
+    def _onUvcPreviewScaleModeChanged(self, text):
+        if self._config:
+            self._config.uvc_preview_scale_mode = str(text)
+
+    def _onNdiSourceChanged(self, text):
+        if self._config:
+            self._config.ndi_source_name = str(text).strip()
+
+    def _openVideoFiltersDialog(self):
+        if not self._config:
+            return
+        existing = getattr(self._config, 'video_filters', []) or []
+        dialog = VideoFiltersDialog(existing, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._config.video_filters = dialog.get_filters()
+            self._updateVideoFiltersSummary()
+
+    def _updateVideoFiltersSummary(self):
+        if not self._config:
+            self.videoFiltersCard.contentLabel.setText("No filters configured")
+            return
+        filters = [item for item in (getattr(self._config, 'video_filters', []) or []) if isinstance(item, dict)]
+        enabled_filters = [item for item in filters if bool(item.get("enabled", True))]
+        total = len(filters)
+        enabled = len(enabled_filters)
+        if total == 0:
+            self.videoFiltersCard.contentLabel.setText("No filters configured")
+        else:
+            names = ", ".join(str(item.get("name", "")).strip() for item in enabled_filters[:3] if item.get("name"))
+            suffix = f"{enabled}/{total} enabled"
+            self.videoFiltersCard.contentLabel.setText(f"{suffix}" + (f" • {names}" if names else ""))
+
+    def _refreshNdiSources(self):
+        if not self._config:
+            return
+        sources: list[str] = []
+        try:
+            from core.screen_capture import list_available_ndi_sources
+            sources = list_available_ndi_sources()
+        except Exception:
+            sources = []
+
+        current_text = self.ndiSourceCombo.currentText().strip()
+        configured = str(getattr(self._config, 'ndi_source_name', '')).strip()
+        self.ndiSourceCombo.blockSignals(True)
+        self.ndiSourceCombo.clear()
+        self.ndiSourceCombo.addItem("Auto (first source)")
+        for source in sources:
+            if source and self.ndiSourceCombo.findText(source) < 0:
+                self.ndiSourceCombo.addItem(source)
+
+        target_text = current_text or configured
+        if target_text:
+            idx = self.ndiSourceCombo.findText(target_text)
+            if idx >= 0:
+                self.ndiSourceCombo.setCurrentIndex(idx)
+            else:
+                self.ndiSourceCombo.setCurrentText(target_text)
+        self.ndiSourceCombo.blockSignals(False)
+
+    def _refreshUvcResolutions(self):
+        if not self._config:
+            return
+        try:
+            from core.screen_capture import list_supported_uvc_resolutions
+            resolutions = list_supported_uvc_resolutions(
+                int(getattr(self._config, 'uvc_device_index', 0)),
+                str(getattr(self._config, 'uvc_capture_method', 'dshow')),
+            )
+        except Exception:
+            resolutions = []
+
+        current_text = self.uvcResolutionCombo.currentText().strip()
+        self.uvcResolutionCombo.blockSignals(True)
+        self.uvcResolutionCombo.clear()
+        if resolutions:
+            for width, height in resolutions:
+                self.uvcResolutionCombo.addItem(f"{width}x{height}")
+        else:
+            fallback = f"{int(getattr(self._config, 'uvc_width', 1920))}x{int(getattr(self._config, 'uvc_height', 1080))}"
+            self.uvcResolutionCombo.addItem(fallback)
+        if current_text:
+            idx = self.uvcResolutionCombo.findText(current_text)
+            if idx >= 0:
+                self.uvcResolutionCombo.setCurrentIndex(idx)
+        self.uvcResolutionCombo.blockSignals(False)
+
     def _updateUvcControlsVisibility(self, screenshot_method):
         is_uvc = (screenshot_method == "uvc")
+        is_ndi = (screenshot_method == "ndi")
         self.uvcDeviceCard.setVisible(is_uvc)
+        self.uvcResolutionCard.setVisible(is_uvc)
+        self.uvcRefreshResolutionCard.setVisible(is_uvc)
+        self.uvcFpsCard.setVisible(is_uvc)
+        self.uvcCaptureMethodCard.setVisible(is_uvc)
         self.uvcPreviewCard.setVisible(is_uvc)
+        self.uvcPreviewScaleCard.setVisible(is_uvc)
+        self.ndiSourceCard.setVisible(is_ndi)
+        self.ndiRefreshSourceCard.setVisible(is_ndi)
+        self.videoFiltersCard.setVisible(is_uvc or is_ndi)
 
     def _onAlwaysAimChanged(self, checked):
         if self._config:
@@ -1348,6 +1876,8 @@ class AimPage(BasePage):
 
         # 模型設定
         self.modelCard.titleLabel.setText(t("model"))
+        self.inferenceBackendCard.titleLabel.setText(t("inference_backend"))
+        self._updateInferenceBackendSubtitle()
         self.openModelFolderCard.titleLabel.setText(t("open_model_folder"))
         self.openModelFolderBtn.setText(t("open_model_folder"))
 
@@ -1364,6 +1894,21 @@ class AimPage(BasePage):
         self.aimPartCard.titleLabel.setText(t("aim_part"))
         self.mouseMoveCard.titleLabel.setText(t("mouse_move_method"))
         self.screenshotMethodCard.titleLabel.setText(t("screenshot_method"))
+        self.uvcDeviceCard.titleLabel.setText("UVC Device Index")
+        self.uvcResolutionCard.titleLabel.setText("UVC Resolution")
+        self.uvcRefreshResolutionCard.titleLabel.setText("Refresh UVC Resolution List")
+        self.uvcRefreshResolutionBtn.setText(t("refresh"))
+        self.uvcFpsCard.titleLabel.setText("UVC FPS")
+        self.uvcCaptureMethodCard.titleLabel.setText("UVC Capture Method")
+        self.uvcPreviewCard.titleLabel.setText("UVC Preview Window")
+        self.uvcPreviewScaleCard.titleLabel.setText("UVC Preview Scale Mode")
+        self.ndiSourceCard.titleLabel.setText("NDI Source")
+        self.ndiSourceCard.contentLabel.setText("Select or type an NDI source name")
+        self.ndiRefreshSourceCard.titleLabel.setText("Refresh NDI Source List")
+        self.ndiRefreshSourceBtn.setText(t("refresh"))
+        self.videoFiltersCard.titleLabel.setText("Video Filters")
+        self.videoFiltersBtn.setText("Filters")
+        self._updateVideoFiltersSummary()
         self.alwaysAimCard.titleLabel.setText(t("always_aim"))
         self.keepDetectingCard.titleLabel.setText(t("keep_detecting"))
         self.idleDetectEnableCard.titleLabel.setText(t("idle_detect_enabled"))

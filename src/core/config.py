@@ -48,8 +48,13 @@ class Config:
         self.uvc_width: int = self.width
         self.uvc_height: int = self.height
         self.uvc_fps: int = 60
+        self.uvc_capture_method: str = "dshow"
+        self.uvc_resolution: str = f"{self.uvc_width}x{self.uvc_height}"
         self.uvc_show_window: bool = True
         self.uvc_window_name: str = "Axiom UVC Preview"
+        self.uvc_preview_scale_mode: str = "scale_to_fit"
+        self.ndi_source_name: str = ""
+        self.video_filters: List[Dict[str, Any]] = []
         self.crosshairX: int = self.width // 2
         self.crosshairY: int = self.height // 2
         self.region: Dict[str, int] = {
@@ -65,6 +70,7 @@ class Config:
         self.model_input_size: int = 640
         self.model_path: str = os.path.join('Model', 'Roblox_8n.onnx')
         self.current_provider: str = "DmlExecutionProvider"
+        self.inference_backend: str = "auto"
         # Hybrid computing: Automatically fallback to CPU when operators are not supported by DirectML
         # ONNX Runtime providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
         self.dml_cpu_fallback: bool = True
@@ -210,6 +216,7 @@ class Config:
             'model_path': self.model_path,
             'model_input_size': self.model_input_size,
             'current_provider': self.current_provider,
+            'inference_backend': self.inference_backend,
             'dml_cpu_fallback': self.dml_cpu_fallback,
             'pid_kp_x': self.pid_kp_x,
             'pid_ki_x': self.pid_ki_x,
@@ -237,8 +244,13 @@ class Config:
             'uvc_width': self.uvc_width,
             'uvc_height': self.uvc_height,
             'uvc_fps': self.uvc_fps,
+            'uvc_capture_method': self.uvc_capture_method,
+            'uvc_resolution': self.uvc_resolution,
             'uvc_show_window': self.uvc_show_window,
             'uvc_window_name': self.uvc_window_name,
+            'uvc_preview_scale_mode': self.uvc_preview_scale_mode,
+            'ndi_source_name': self.ndi_source_name,
+            'video_filters': self.video_filters,
             'keep_detecting': self.keep_detecting,
             'always_aim': self.always_aim,
             'fov_follow_mouse': self.fov_follow_mouse,
@@ -370,6 +382,9 @@ def load_config(config_instance: Config, filepath: str = 'config.json') -> bool:
         # 向後兼容：修正滑鼠移動方式
         _validate_mouse_method(config_instance)
 
+        # 向後兼容：修正推理後端選擇
+        _validate_inference_backend(config_instance)
+
         # 向後兼容：確保偵測範圍在合理範圍內
         _validate_detect_range_size(config_instance)
         
@@ -435,9 +450,16 @@ def _validate_mouse_method(config: Config) -> None:
 
 def _validate_screenshot_method(config: Config) -> None:
     """驗證並修正螢幕截圖方式"""
-    valid_screenshot_methods = ('mss', 'dxcam', 'uvc')
+    valid_screenshot_methods = ('mss', 'dxcam', 'uvc', 'ndi')
     if getattr(config, 'screenshot_method', 'mss') not in valid_screenshot_methods:
         config.screenshot_method = 'mss'
+    config.ndi_source_name = str(getattr(config, 'ndi_source_name', '') or '').strip()
+    if getattr(config, 'uvc_capture_method', 'dshow') not in ('auto', 'dshow', 'msmf', 'any'):
+        config.uvc_capture_method = 'dshow'
+    if getattr(config, 'uvc_preview_scale_mode', 'scale_to_fit') not in (
+        'scale_to_fit', 'scale_to_canvas', 'fit_to_screen'
+    ):
+        config.uvc_preview_scale_mode = 'scale_to_fit'
 
 
 def _validate_detect_range_size(config: Config) -> None:
@@ -459,3 +481,10 @@ def _validate_detect_range_size(config: Config) -> None:
 
     clamped = max(min_size, min(max_size, raw))
     config.detect_range_size = clamped
+
+
+def _validate_inference_backend(config: Config) -> None:
+    """驗證並修正推理後端選擇"""
+    valid_backends = ("auto", "cuda", "directml", "cpu")
+    if getattr(config, "inference_backend", "auto") not in valid_backends:
+        config.inference_backend = "auto"
