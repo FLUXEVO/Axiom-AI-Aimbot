@@ -65,6 +65,7 @@ class Config:
         self.model_input_size: int = 640
         self.model_path: str = os.path.join('Model', 'Roblox_8n.onnx')
         self.current_provider: str = "DmlExecutionProvider"
+        self.inference_backend: str = "auto"
         # Hybrid computing: Automatically fallback to CPU when operators are not supported by DirectML
         # ONNX Runtime providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
         self.dml_cpu_fallback: bool = True
@@ -210,6 +211,7 @@ class Config:
             'model_path': self.model_path,
             'model_input_size': self.model_input_size,
             'current_provider': self.current_provider,
+            'inference_backend': self.inference_backend,
             'dml_cpu_fallback': self.dml_cpu_fallback,
             'pid_kp_x': self.pid_kp_x,
             'pid_ki_x': self.pid_ki_x,
@@ -370,6 +372,9 @@ def load_config(config_instance: Config, filepath: str = 'config.json') -> bool:
         # 向後兼容：修正滑鼠移動方式
         _validate_mouse_method(config_instance)
 
+        # 向後兼容：修正推理後端選擇
+        _validate_inference_backend(config_instance)
+
         # 向後兼容：確保偵測範圍在合理範圍內
         _validate_detect_range_size(config_instance)
         
@@ -459,3 +464,10 @@ def _validate_detect_range_size(config: Config) -> None:
 
     clamped = max(min_size, min(max_size, raw))
     config.detect_range_size = clamped
+
+
+def _validate_inference_backend(config: Config) -> None:
+    """驗證並修正推理後端選擇"""
+    valid_backends = ("auto", "cuda", "directml", "cpu")
+    if getattr(config, "inference_backend", "auto") not in valid_backends:
+        config.inference_backend = "auto"
