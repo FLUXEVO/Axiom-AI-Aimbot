@@ -5,6 +5,25 @@ import logging
 import onnxruntime as ort
 
 
+def build_provider_list(config) -> list[str]:
+    """Build provider priority list based on user backend preference."""
+    try:
+        available = set(ort.get_available_providers())
+    except Exception:
+        available = {"CPUExecutionProvider"}
+
+    backend = getattr(config, "inference_backend", "auto")
+    provider_map = {
+        "auto": ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"],
+        "cuda": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        "directml": ["DmlExecutionProvider", "CPUExecutionProvider"],
+        "cpu": ["CPUExecutionProvider"],
+    }
+    preferred = provider_map.get(backend, provider_map["auto"])
+    filtered = [provider for provider in preferred if provider in available]
+    return filtered or ["CPUExecutionProvider"]
+
+
 def optimize_onnx_session(config):
     """優化 ONNX 運行時設定
     
@@ -52,4 +71,3 @@ def optimize_onnx_session(config):
     except Exception as e:
         logger.error("ONNX 優化失敗: %s", e)
         return None
-
