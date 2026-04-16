@@ -88,6 +88,9 @@ project_root = os.path.dirname(src_dir)
 
 import threading
 import queue
+import shutil
+import subprocess
+import re
 from typing import Optional
 
 # 初始化 pywin32 - 必須先導入 pywintypes
@@ -144,6 +147,75 @@ from gui.disclaimer_dialog import DisclaimerDialog
 # 全域變數宣告
 ai_thread: Optional[threading.Thread] = None
 auto_fire_thread: Optional[threading.Thread] = None
+
+
+def _get_nvcc_version() -> str | None:
+    """Best-effort query of installed CUDA Toolkit version via nvcc."""
+    nvcc_path = shutil.which("nvcc")
+    if not nvcc_path:
+        return None
+    try:
+        result = subprocess.run(
+            [nvcc_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        text = (result.stdout or "") + "\n" + (result.stderr or "")
+        match = re.search(r"release\s+(\d+\.\d+)", text)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def _get_nvidia_smi_summary() -> str | None:
+    """Best-effort query of NVIDIA GPU/driver info."""
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return None
+    try:
+        result = subprocess.run(
+            [nvidia_smi, "--query-gpu=name,driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        output = (result.stdout or "").strip()
+        return output.splitlines()[0] if output else None
+    except Exception:
+        return None
+
+
+def log_cuda_startup_check(config: Config, available_providers: list[str]) -> None:
+    """
+    Startup diagnostics for CUDA availability and likely runtime behavior.
+
+    This gives users an immediate hint whether CUDA can be used and what to install/check.
+    """
+    selected_backend = str(getattr(config, "inference_backend", "auto")).lower()
+    has_cuda_ep = "CUDAExecutionProvider" in set(available_providers)
+    nvcc_version = _get_nvcc_version()
+    nvidia_summary = _get_nvidia_smi_summary()
+
+    logger.info(
+        "CUDA 啟動檢查 | backend=%s | CUDAExecutionProvider=%s | nvcc=%s | nvidia-smi=%s",
+        selected_backend,
+        "available" if has_cuda_ep else "missing",
+        nvcc_version or "not found",
+        nvidia_summary or "not found",
+    )
+
+    if selected_backend == "cuda":
+        if has_cuda_ep:
+            logger.info("CUDA 後端可用：模型載入後應使用 CUDAExecutionProvider（若版本相容）。")
+        else:
+            logger.warning(
+                "已選擇 CUDA，但目前未偵測到 CUDAExecutionProvider；請安裝/檢查 onnxruntime-gpu 與 NVIDIA Driver/CUDA/cuDNN 版本相容性。"
+            )
+    elif selected_backend == "auto" and has_cuda_ep:
+        logger.info("Auto 後端將優先嘗試 CUDAExecutionProvider。")
 
 def start_ai_threads(
     config: Config,
@@ -259,6 +331,7 @@ def main():
     logger.info("ONNX 可用 providers: %s", available_providers)
     logger.info("設定選擇推理後端: %s", selected_backend)
     logger.info("最終啟用 ONNX provider: 尚未載入模型")
+    log_cuda_startup_check(config, available_providers)
     
     # 調試：顯示載入的滑鼠移動方式
     logger.info("配置載入：滑鼠移動方式 %s", config.mouse_move_method)
