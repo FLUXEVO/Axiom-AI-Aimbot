@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 _WARNED_MESSAGES: set[str] = set()
 
 
-def _uvc_signature(config: Config) -> tuple[int, int, int, int, bool, str]:
+def _uvc_signature(config: Config) -> tuple[int, int, int, int, bool, str, str, str]:
     return (
         int(getattr(config, 'uvc_device_index', 0)),
         int(getattr(config, 'uvc_width', 0)),
@@ -23,7 +23,46 @@ def _uvc_signature(config: Config) -> tuple[int, int, int, int, bool, str]:
         int(getattr(config, 'uvc_fps', 0)),
         bool(getattr(config, 'uvc_show_window', False)),
         str(getattr(config, 'uvc_window_name', 'Axiom UVC Preview')),
+        str(getattr(config, 'uvc_capture_method', 'dshow')).lower(),
+        str(getattr(config, 'uvc_preview_scale_mode', 'scale_to_fit')).lower(),
     )
+
+
+def list_supported_uvc_resolutions(
+    device_index: int,
+    capture_method: str = 'dshow',
+) -> list[tuple[int, int]]:
+    """Probe common UVC resolutions and return distinct supported entries."""
+
+    backend_map = {
+        'dshow': cv2.CAP_DSHOW,
+        'msmf': cv2.CAP_MSMF,
+        'any': cv2.CAP_ANY,
+    }
+    backend = backend_map.get(str(capture_method).lower(), cv2.CAP_DSHOW)
+    cap = cv2.VideoCapture(int(device_index), backend)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(int(device_index))
+    if not cap.isOpened():
+        return []
+
+    common_resolutions = [
+        (320, 240), (640, 360), (640, 480), (800, 600), (960, 540),
+        (1024, 576), (1024, 768), (1280, 720), (1280, 960), (1600, 900),
+        (1920, 1080), (2560, 1440), (3840, 2160),
+    ]
+    supported: set[tuple[int, int]] = set()
+    try:
+        for width, height in common_resolutions:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            if actual_w > 0 and actual_h > 0 and abs(actual_w - width) <= 8 and abs(actual_h - height) <= 8:
+                supported.add((actual_w, actual_h))
+    finally:
+        cap.release()
+    return sorted(supported, key=lambda item: (item[0] * item[1], item[0]))
 
 
 class UVCCapture:
@@ -39,7 +78,17 @@ class UVCCapture:
         self.window_name = str(getattr(config, 'uvc_window_name', 'Axiom UVC Preview'))
         self.config_signature = _uvc_signature(config)
 
-        self.cap = cv2.VideoCapture(device_index, cv2.CAP_DSHOW)
+        capture_method = str(getattr(config, 'uvc_capture_method', 'dshow')).lower()
+        backend_map = {
+            'dshow': cv2.CAP_DSHOW,
+            'msmf': cv2.CAP_MSMF,
+            'any': cv2.CAP_ANY,
+            'auto': cv2.CAP_ANY,
+        }
+        backend = backend_map.get(capture_method, cv2.CAP_DSHOW)
+        self.preview_scale_mode = str(getattr(config, 'uvc_preview_scale_mode', 'scale_to_fit')).lower()
+
+        self.cap = cv2.VideoCapture(device_index, backend)
         if not self.cap.isOpened():
             # Fallback backend when CAP_DSHOW is unavailable
             self.cap = cv2.VideoCapture(device_index)
@@ -53,18 +102,47 @@ class UVCCapture:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         if fps > 0:
             self.cap.set(cv2.CAP_PROP_FPS, fps)
+        try:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        except Exception:
+            pass
+        self.preview_width = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or width or 1))
+        self.preview_height = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or height or 1))
+        self.preview_fps = max(1, int(self.cap.get(cv2.CAP_PROP_FPS) or fps or 1))
         # Keep capture queue short to reduce latency.
         try:
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
 
+        if self.show_window:
+            try:
+                cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(self.window_name, self.preview_width, self.preview_height)
+            except Exception:
+                pass
+
     def grab(self, region: dict[str, int] | None = None, **_: Any) -> np.ndarray | None:
-        """Return BGRA frame cropped by region when provided."""
+        """Return BGRA frame cropped by region when provided.
+
+        UVC preview always renders on the full capture frame so the preview
+        window remains independent from the AI detection crop region.
+        """
 
         ok, frame_bgr = self.cap.read()
         if not ok or frame_bgr is None:
             return None
+
+        full_frame_bgr = frame_bgr
+
+        if self.show_window:
+            try:
+                preview_frame = self._draw_overlay(full_frame_bgr.copy(), region)
+                render_frame = self._render_preview_frame(preview_frame)
+                cv2.imshow(self.window_name, render_frame)
+                cv2.waitKey(1)
+            except Exception:
+                pass
 
         if region is not None:
             frame_h, frame_w = frame_bgr.shape[:2]
@@ -78,14 +156,6 @@ class UVCCapture:
                 return None
             frame_bgr = frame_bgr[top:bottom, left:right]
 
-        if self.show_window:
-            try:
-                preview_frame = self._draw_overlay(frame_bgr.copy(), region)
-                cv2.imshow(self.window_name, preview_frame)
-                cv2.waitKey(1)
-            except Exception:
-                pass
-
         return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2BGRA)
 
     def _draw_overlay(self, frame_bgr: np.ndarray, region: dict[str, int] | None) -> np.ndarray:
@@ -98,17 +168,17 @@ class UVCCapture:
         h, w = frame_bgr.shape[:2]
         region_left = int(region.get('left', 0)) if region else 0
         region_top = int(region.get('top', 0)) if region else 0
+        region_width = int(region.get('width', w)) if region else w
+        region_height = int(region.get('height', h)) if region else h
 
-        cx = int(getattr(cfg, 'crosshairX', w // 2)) - region_left
-        cy = int(getattr(cfg, 'crosshairY', h // 2)) - region_top
+        cx = int(getattr(cfg, 'crosshairX', w // 2))
+        cy = int(getattr(cfg, 'crosshairY', h // 2))
 
         if bool(getattr(cfg, 'show_detect_range', False)):
-            range_size = int(getattr(cfg, 'detect_range_size', min(w, h)))
-            half = max(1, range_size // 2)
-            x1 = max(0, cx - half)
-            y1 = max(0, cy - half)
-            x2 = min(w - 1, cx + half)
-            y2 = min(h - 1, cy + half)
+            x1 = max(0, region_left)
+            y1 = max(0, region_top)
+            x2 = min(w - 1, region_left + region_width)
+            y2 = min(h - 1, region_top + region_height)
             cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (255, 140, 0), 1, cv2.LINE_AA)
 
         if bool(getattr(cfg, 'show_fov', True)):
@@ -140,10 +210,6 @@ class UVCCapture:
                     x1, y1, x2, y2 = [int(v) for v in box]
                 except Exception:
                     continue
-                x1 -= region_left
-                x2 -= region_left
-                y1 -= region_top
-                y2 -= region_top
                 if x2 <= 0 or y2 <= 0 or x1 >= w or y1 >= h:
                     continue
                 x1 = max(0, min(w - 1, x1))
@@ -165,6 +231,47 @@ class UVCCapture:
                     )
 
         return frame_bgr
+
+    def _render_preview_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
+        mode = self.preview_scale_mode
+        if mode == 'scale_to_canvas':
+            try:
+                _, _, width, height = cv2.getWindowImageRect(self.window_name)
+                if width > 0 and height > 0:
+                    return cv2.resize(frame_bgr, (width, height), interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                return frame_bgr
+        if mode == 'fit_to_screen':
+            try:
+                screen_w, screen_h = 1920, 1080
+                max_w = max(320, int(screen_w * 0.9))
+                max_h = max(240, int(screen_h * 0.9))
+                h, w = frame_bgr.shape[:2]
+                ratio = min(max_w / max(1, w), max_h / max(1, h))
+                target_w = max(1, int(w * ratio))
+                target_h = max(1, int(h * ratio))
+                cv2.resizeWindow(self.window_name, target_w, target_h)
+            except Exception:
+                pass
+            return frame_bgr
+
+        # default: scale_to_fit
+        try:
+            _, _, width, height = cv2.getWindowImageRect(self.window_name)
+            if width <= 0 or height <= 0:
+                return frame_bgr
+            h, w = frame_bgr.shape[:2]
+            ratio = min(width / max(1, w), height / max(1, h))
+            draw_w = max(1, int(w * ratio))
+            draw_h = max(1, int(h * ratio))
+            resized = cv2.resize(frame_bgr, (draw_w, draw_h), interpolation=cv2.INTER_LINEAR)
+            canvas = np.zeros((height, width, 3), dtype=np.uint8)
+            x = (width - draw_w) // 2
+            y = (height - draw_h) // 2
+            canvas[y:y + draw_h, x:x + draw_w] = resized
+            return canvas
+        except Exception:
+            return frame_bgr
 
     def close(self) -> None:
         if self.cap is not None:

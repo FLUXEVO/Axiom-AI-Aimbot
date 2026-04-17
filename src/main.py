@@ -131,7 +131,7 @@ if sys.platform == "win32":
 # 從我們自己建立的模組中導入
 from core.config import Config, load_config, save_config
 from win_utils import check_and_request_admin, test_ddxoft_functions, ensure_ddxoft_ready
-from core.session_utils import optimize_onnx_session
+from core.session_utils import build_provider_list, optimize_onnx_session
 from core.ai_loop import ai_logic_loop
 from core.auto_fire import auto_fire_loop
 from core.key_listener import aim_toggle_key_listener
@@ -193,8 +193,8 @@ def start_ai_threads(
     
     model = None
     try:
-        # 僅使用 DirectML 提供者
-        providers = ['DmlExecutionProvider']
+        providers = build_provider_list(config)
+        logger.info("嘗試載入 ONNX providers: %s", providers)
 
         # 獲取優化的會話選項
         session_options = optimize_onnx_session(config)
@@ -208,12 +208,21 @@ def start_ai_threads(
         if actual_providers:
             config.current_provider = actual_providers[0]
             logger.info("模型載入使用提供者: %s", actual_providers[0])
+            logger.info("最終啟用 ONNX provider: %s", config.current_provider)
+
+            requested_backend = getattr(config, "inference_backend", "auto")
+            if requested_backend == "cuda" and config.current_provider != "CUDAExecutionProvider":
+                logger.warning(
+                    "已選擇 CUDA 後端，但實際 provider 為 %s。請檢查 onnxruntime-gpu、NVIDIA Driver、CUDA/cuDNN 相容性。",
+                    config.current_provider,
+                )
         else:
             logger.warning("無法獲取提供者資訊")
-            config.current_provider = 'DmlExecutionProvider'
+            config.current_provider = providers[0] if providers else 'CPUExecutionProvider'
+            logger.info("最終啟用 ONNX provider: %s", config.current_provider)
     except Exception as e:
         logger.error("載入 ONNX 模型失敗: %s", e)
-        logger.error("請確認已安裝 onnxruntime-directml 且系統支援 DirectML")
+        logger.error("請確認已安裝對應 ONNX Runtime 後端（CUDA/DirectML/CPU）")
         return False
 
     ai_thread = threading.Thread(
@@ -239,6 +248,17 @@ def main():
 
     config = Config()
     load_config(config)
+
+    try:
+        available_providers = ort.get_available_providers()
+    except Exception as e:
+        available_providers = ["CPUExecutionProvider"]
+        logger.warning("取得可用 ONNX providers 失敗，預設為 CPUExecutionProvider：%s", e)
+
+    selected_backend = getattr(config, "inference_backend", "auto")
+    logger.info("ONNX 可用 providers: %s", available_providers)
+    logger.info("設定選擇推理後端: %s", selected_backend)
+    logger.info("最終啟用 ONNX provider: 尚未載入模型")
     
     # 調試：顯示載入的滑鼠移動方式
     logger.info("配置載入：滑鼠移動方式 %s", config.mouse_move_method)

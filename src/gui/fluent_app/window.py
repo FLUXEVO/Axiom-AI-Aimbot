@@ -317,6 +317,16 @@ class AxiomWindow(FluentWindow):
         # 確保參數管理頁的左右面板在配置更新後立即重繪磨砂樣式
         if hasattr(self, 'configInterface') and hasattr(self.configInterface, '_applyPanelStyles'):
             self.configInterface._applyPanelStyles()
+
+    def updateVisualsVisibilityForScreenshotMethod(self, screenshot_method: str):
+        """UVC 模式下隱藏 visual 頁籤，避免與 UVC 預覽重複顯示。"""
+        is_uvc = str(screenshot_method).lower() == 'uvc'
+        should_show_visuals = not is_uvc
+        if hasattr(self, 'nav_display') and self.nav_display is not None:
+            self.nav_display.setVisible(should_show_visuals)
+
+        if is_uvc and self.stackedWidget.currentWidget() is self.displayInterface:
+            self.switchTo(self.aimInterface)
     
     def setConfigManager(self, manager):
         """設定 ConfigManager 實例"""
