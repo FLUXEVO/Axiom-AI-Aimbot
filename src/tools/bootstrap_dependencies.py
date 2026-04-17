@@ -65,23 +65,31 @@ def _download_all_backend_wheels() -> int:
 
 
 def main() -> int:
-    if _ensure_pip() != 0:
-        print("[Axiom][deps] Failed to initialize pip.")
-        return 1
-
     missing = _missing_core_modules()
+    pip_ready = (_ensure_pip() == 0)
+    if not pip_ready:
+        print("[Axiom][deps] pip unavailable (likely embedded runtime without pip/ensurepip).")
+
     if missing:
         print(f"[Axiom][deps] Missing modules: {', '.join(missing)}")
+        if not pip_ready:
+            print("[Axiom][deps] Cannot auto-install missing modules because pip is unavailable.")
+            print("[Axiom][deps] Please use a full Python runtime or prebundle dependencies.")
+            return 1
         print("[Axiom][deps] Installing default runtime dependencies (DirectML)...")
         if _install_default_runtime() != 0:
             return 1
     else:
         print("[Axiom][deps] Core dependencies already available.")
 
+    if not pip_ready:
+        print("[Axiom][deps] Skipping wheel pre-download because pip is unavailable.")
+        return 0
+
     print("[Axiom][deps] Downloading dependency wheels for CPU/DirectML/CUDA...")
     if _download_all_backend_wheels() != 0:
-        print("[Axiom][deps] Wheel download failed.")
-        return 1
+        print("[Axiom][deps] Wheel download failed (non-fatal).")
+        return 0
 
     print("[Axiom][deps] Dependency bootstrap completed.")
     return 0
