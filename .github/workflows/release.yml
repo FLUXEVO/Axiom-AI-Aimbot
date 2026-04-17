@@ -1,10 +1,13 @@
 name: Auto Tag and Release
 
 on:
-  push:
+  pull_request:
+    types:
+      - closed
     branches:
       - main
       - GPU
+
   workflow_dispatch:
     inputs:
       target_branch:
@@ -21,6 +24,9 @@ permissions:
 
 jobs:
   tag-and-release:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
 
     steps:
@@ -31,7 +37,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             branch="${{ inputs.target_branch }}"
           else
-            branch="${{ github.ref_name }}"
+            branch="${{ github.event.pull_request.base.ref }}"
           fi
 
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
